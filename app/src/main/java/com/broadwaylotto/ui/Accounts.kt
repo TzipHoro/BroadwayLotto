@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.broadwaylotto.sites.Sites
+import com.broadwaylotto.automation.AppAutomationService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -79,6 +80,46 @@ fun LuckySeatAccountCard() {
         }
     }
     if (dialog) SignInDialog(prefillEmail = state.email.orEmpty(), onDismiss = { dialog = false })
+}
+
+@Composable
+fun AppAutomationCard() {
+    val context = LocalContext.current
+    val connected by AppAutomationService.connected.collectAsState()
+    val running by AppAutomationService.running.collectAsState()
+    val progress by AppAutomationService.progress.collectAsState()
+
+    Card(Modifier.fillMaxWidth(), shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("TodayTix and Hamilton", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "These lotteries only exist in their phone apps, so Broadway Lotto taps through the TodayTix and Hamilton apps for you. " +
+                    "It can only see those two apps, and it only enters when you tap an alert or a show's Enter button.",
+                color = Muted, fontSize = 13.sp,
+            )
+            if (!connected) {
+                Text("Not switched on yet.", color = Warn, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "In Android Settings → Accessibility, turn on “Broadway Lotto”. Android will warn you that it can read the app it's allowed to watch; those are the TodayTix and Hamilton apps only.",
+                    color = Muted, fontSize = 13.sp,
+                )
+                Button(
+                    onClick = { context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
+                ) { Text("Open Accessibility settings") }
+            } else {
+                Text("Switched on.", color = Good, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "To get an alert when a lottery opens, keep each app's own lottery reminders on (in TodayTix, the show's lottery alert; in Hamilton, “Send me Broadway lottery reminder notifications”). " +
+                        "Broadway Lotto turns those into a tap-to-enter notification for your selected shows. " +
+                        "Keep the phone unlocked when you tap it.",
+                    color = Muted, fontSize = 13.sp,
+                )
+                if (running) Text("Running…", color = Gold, fontWeight = FontWeight.SemiBold)
+            }
+            if (progress.isNotBlank()) Text(progress, color = if (running) Gold else Cream, fontSize = 13.sp)
+        }
+    }
 }
 
 @Composable
@@ -144,5 +185,29 @@ private fun SignInDialog(prefillEmail: String, onDismiss: () -> Unit) {
             ) { Text(if (busy) "Signing in…" else "Sign in") }
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel", color = Muted) } },
+    )
+}
+
+/** Shown once before Hamilton entries: the runner ticks the app's two consent boxes for the user. */
+@Composable
+fun HamiltonConsentDialog(onAgree: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = { Text("Before entering Hamilton for you", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Hamilton's entry page makes you tick two boxes before you can submit:", fontSize = 14.sp)
+                Text("• You accept the Terms of Service, Privacy Notice and the lottery's official rules.", fontSize = 13.sp, color = Muted)
+                Text("• You've reviewed your profile and understand winners must collect tickets in person with a valid ID that matches the name on the entry, and that the entry can't be changed.", fontSize = 13.sp, color = Muted)
+                Text("Broadway Lotto will tick both boxes on your behalf each time it enters, which means you're agreeing to them. Read them in the Hamilton app if you haven't.", fontSize = 14.sp)
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAgree, colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink)) {
+                Text("I've read them, and agree")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } },
     )
 }

@@ -1,6 +1,8 @@
 package com.broadwaylotto.model
 
 import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.encodeToString
@@ -11,9 +13,53 @@ class Repo private constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("lotto", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val _watches = MutableStateFlow(load("watches", emptyList<Watch>()))
+    private val _watches = MutableStateFlow(migrateWatches(load("watches", emptyList<Watch>())))
+
+    /**
+     * Hamilton used to be an "Other" shortcut (an Open button for its app). It's now a real site that
+     * the app enters for, so an old shortcut becomes a Hamilton watch; its days and times then follow
+     * the user's defaults. If a Hamilton watch already exists, the old shortcut is simply dropped.
+     */
+    private fun migrateWatches(saved: List<Watch>): List<Watch> {
+        val isOldHamilton = { w: Watch -> w.site == Site.OTHER && w.link == "app:com.hamilton.app" }
+        if (saved.none(isOldHamilton)) return saved
+        val hasNew = saved.any { it.site == Site.HAMILTON }
+        val migrated = saved.mapNotNull { w ->
+            when {
+                !isOldHamilton(w) -> w
+                hasNew -> null
+                else -> w.copy(site = Site.HAMILTON, link = null, slots = null)
+            }
+        }
+        prefs.edit().putString("watches", json.encodeToString(migrated)).apply()
+        return migrated
+    }
     private val _log = MutableStateFlow(load("log", emptyList<EntryRecord>()))
-    private val _profile = MutableStateFlow(load("profile", Profile()))
+
+    // The profile holds personal details (name, email, date of birth), so it lives in encrypted
+    // storage, with its key in the Android Keystore, rather than in the plain prefs above.
+    private val securePrefs = EncryptedSharedPreferences.create(
+        context.applicationContext,
+        "lotto_profile",
+        MasterKey.Builder(context.applicationContext).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
+    private val _profile = MutableStateFlow(loadProfile())
+
+    private fun loadProfile(): Profile {
+        securePrefs.getString(PROFILE_KEY, null)
+            ?.let { runCatching { json.decodeFromString<Profile>(it) }.getOrNull() }
+            ?.let { return it }
+        // One-time move of a profile saved by an older version in plain text.
+        val legacy = prefs.getString("profile", null)?.let { runCatching { json.decodeFromString<Profile>(it) }.getOrNull() }
+        if (legacy != null) {
+            securePrefs.edit().putString(PROFILE_KEY, json.encodeToString(legacy)).apply()
+            prefs.edit().remove("profile").apply()
+            return legacy
+        }
+        return Profile()
+    }
 
     private val _defaults = MutableStateFlow(load("defaults", emptySet<Slot>()))
 
@@ -88,6 +134,16 @@ class Repo private constructor(context: Context) {
         save("lottery_state", lotteryState.toMap())
     }
 
+    // The user's one-time OK for the Hamilton runner to tick the app's two "I accept / I have reviewed"
+    // boxes on their behalf. Saved so it only asks once.
+    private val _hamiltonConsent = MutableStateFlow(prefs.getBoolean("hamilton_consent", false))
+    val hamiltonConsent: StateFlow<Boolean> = _hamiltonConsent
+
+    fun setHamiltonConsent(value: Boolean) {
+        _hamiltonConsent.value = value
+        prefs.edit().putBoolean("hamilton_consent", value).apply()
+    }
+
     // What the last check found for each watch (watch id -> one line). In memory only: it's
     // recomputed on every check, so there's nothing worth persisting.
     private val _watchStatus = MutableStateFlow<Map<String, String>>(emptyMap())
@@ -111,6 +167,13 @@ class Repo private constructor(context: Context) {
         save("lottery_state", lotteryState.toMap())
     }
 
+    /** Removes one item from the Activity list; per-lottery progress is kept, so it won't re-alert. */
+    @Synchronized
+    fun removeRecord(record: EntryRecord) {
+        _log.value = _log.value.filterNot { it.lotteryId == record.lotteryId && it.atMillis == record.atMillis }
+        save("log", _log.value)
+    }
+
     /** Empties the Activity list only; per-lottery progress is kept. */
     @Synchronized
     fun clearLog() {
@@ -120,7 +183,7 @@ class Repo private constructor(context: Context) {
 
     fun setProfile(profile: Profile) {
         _profile.value = profile
-        save("profile", profile)
+        securePrefs.edit().putString(PROFILE_KEY, json.encodeToString(profile)).apply()
     }
 
     private inline fun <reified T> load(key: String, default: T): T =
@@ -132,6 +195,7 @@ class Repo private constructor(context: Context) {
 
     companion object {
         private const val HANDLED = -1
+        private const val PROFILE_KEY = "profile"
         @Volatile private var instance: Repo? = null
         fun get(context: Context): Repo =
             instance ?: synchronized(this) { instance ?: Repo(context).also { instance = it } }

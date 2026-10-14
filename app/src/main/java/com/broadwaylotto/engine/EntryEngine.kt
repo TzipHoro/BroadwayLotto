@@ -10,6 +10,7 @@ import com.broadwaylotto.model.Site
 import com.broadwaylotto.model.Slot
 import com.broadwaylotto.model.Watch
 import com.broadwaylotto.sites.Sites
+import kotlinx.coroutines.CancellationException
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -37,8 +38,15 @@ class EntryEngine(private val context: Context) {
 
         for ((site, siteWatches) in watches.groupBy { it.site }) {
             val adapter = Sites.all[site] ?: continue
+            if (!adapter.canListLotteries) {
+                repo.setWatchStatus(siteWatches.associate { it.id to "Alerts come from ${site.label}'s own notifications, or tap Enter below" })
+                continue
+            }
             val lotteries = try {
                 adapter.fetchLotteries(now, siteWatches.mapTo(mutableSetOf()) { it.title })
+            } catch (e: CancellationException) {
+                // The check was stopped (the app restarted, or a newer check took over): not a failure to log.
+                throw e
             } catch (e: Exception) {
                 // This runs every 15 minutes; don't flood the log with the same outage.
                 val message = "Couldn't load lotteries: ${e.message}"
@@ -77,6 +85,8 @@ class EntryEngine(private val context: Context) {
                 val allWanted = ready.flatMap { it.wanted }.distinct().sorted()
                 val result = try {
                     adapter.enter(lead, allWanted, profile)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     EntryResult.Failed(e.message ?: "Unknown error")
                 }

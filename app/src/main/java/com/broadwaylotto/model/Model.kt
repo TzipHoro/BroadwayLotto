@@ -8,6 +8,12 @@ enum class Site(val label: String, val homeUrl: String) {
     BROADWAY_DIRECT("Broadway Direct", "https://lottery.broadwaydirect.com"),
     TODAYTIX("TodayTix", "https://www.todaytix.com"),
     LUCKY_SEAT("Lucky Seat", "https://www.luckyseat.com"),
+
+    /** The official Hamilton app's Broadway lottery. Entered by tapping through that app, like TodayTix. */
+    HAMILTON("Hamilton", "https://www.hamiltonmusical.com/lottery/"),
+
+    /** Lotteries that run in some other show's app or site. Tracked with a shortcut, never automated. */
+    OTHER("Other", ""),
 }
 
 enum class Weekday(val short: String) {
@@ -32,6 +38,11 @@ data class Watch(
     val site: Site,
     val enabled: Boolean = true,
     val slots: Set<Slot>? = null,
+    /**
+     * For [Site.OTHER] shows: where to enter. "app:<package>" launches that Android app; anything else
+     * is a web address. Unused for the other sites.
+     */
+    val link: String? = null,
 ) {
     val usesDefaults get() = slots == null
 
@@ -51,8 +62,15 @@ data class Profile(
     val lastName: String = "",
     val email: String = "",
     val tickets: Int = 2,
+    /** Date of birth as ISO yyyy-MM-dd, or blank. Broadway Direct asks for it. */
+    val dob: String = "",
+    /** Broadway Direct's entry form asks for these too. [country] is one of "USA", "CANADA", "OTHER". */
+    val zip: String = "",
+    val country: String = "USA",
 ) {
+    /** Enough to be alerted. Entering on a site may need more (see [hasDob]). */
     val isComplete get() = firstName.isNotBlank() && lastName.isNotBlank() && email.isNotBlank()
+    val hasDob get() = dob.isNotBlank()
 }
 
 /** One open-or-upcoming lottery as reported by a site. A lottery can cover many performances. */

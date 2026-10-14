@@ -33,7 +33,7 @@ object Scheduler {
 
     fun checkNow(context: Context) {
         WorkManager.getInstance(context).enqueueUniqueWork(
-            ONCE, ExistingWorkPolicy.REPLACE,
+            ONCE, ExistingWorkPolicy.APPEND_OR_REPLACE,
             OneTimeWorkRequestBuilder<EntryWorker>().build(),
         )
     }

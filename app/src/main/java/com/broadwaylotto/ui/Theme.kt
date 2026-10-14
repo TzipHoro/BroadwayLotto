@@ -25,6 +25,8 @@ fun Site.accent(): Color = when (this) {
     Site.BROADWAY_DIRECT -> Color(0xFFE07A3F)
     Site.TODAYTIX -> Color(0xFF3FB8AF)
     Site.LUCKY_SEAT -> Color(0xFF9B7BE0)
+    Site.HAMILTON -> Color(0xFFD9B26B)
+    Site.OTHER -> Color(0xFFB8AFC9)
 }
 
 private val scheme = darkColorScheme(

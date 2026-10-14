@@ -31,13 +31,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.broadwaylotto.model.Repo
 import com.broadwaylotto.sites.Sites
 import org.json.JSONObject
 
 private const val LUCKY_SEAT_ORIGIN = "https://www.luckyseat.com/"
 
-/** True for links that should open in [SiteBrowser] so the Lucky Seat session carries over. */
-fun opensInApp(url: String) = Uri.parse(url).host?.endsWith("luckyseat.com") == true
+/** True for links that should open in [SiteBrowser]: Lucky Seat (its session carries over) and Broadway Direct entry pages (pre-filled). */
+fun opensInApp(url: String) = isLuckySeat(url) || isBroadwayDirectEntry(url)
+
+private fun isLuckySeat(url: String) = Uri.parse(url).host?.endsWith("luckyseat.com") == true
+
+private fun isBroadwayDirectEntry(url: String): Boolean {
+    val u = Uri.parse(url)
+    return u.host == "lottery.broadwaydirect.com" && u.path.orEmpty().startsWith("/enter-lottery")
+}
 
 /**
  * In-app browser. For Lucky Seat it starts already signed in: the stored session is written into the
@@ -59,9 +67,13 @@ fun SiteBrowser(request: PageRequest, onClose: () -> Unit) {
     // Loading the session can involve one quick network call (see LuckySeatAuth.browserSession),
     // so the page waits until it's ready.
     var session by remember(url) { mutableStateOf<Map<String, String>?>(null) }
-    var ready by remember(url) { mutableStateOf(!opensInApp(url)) }
+    var ready by remember(url) { mutableStateOf(!isLuckySeat(url)) }
+    // Broadway Direct has no sign-in; its entry form is filled from the saved profile instead.
+    val fillScript = remember(url) {
+        if (isBroadwayDirectEntry(url)) broadwayDirectFillScript(Repo.get(context).profile.value) else null
+    }
     LaunchedEffect(url) {
-        if (opensInApp(url)) {
+        if (isLuckySeat(url)) {
             session = Sites.luckySeatAuth.browserSession()
             ready = true
         }
@@ -82,10 +94,65 @@ fun SiteBrowser(request: PageRequest, onClose: () -> Unit) {
         Column(Modifier.padding(pad).fillMaxSize()) {
             if (loading) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Gold)
             if (ready) {
-                AndroidView(modifier = Modifier.fillMaxSize(), factory = { configure(webView, request, session) { loading = false }; webView })
+                AndroidView(modifier = Modifier.fillMaxSize(), factory = { configure(webView, request, session, fillScript) { loading = false }; webView })
             }
         }
     }
+}
+
+/**
+ * Fills Broadway Direct's entry form from the saved profile: name, ticket quantity (the form offers 0 to
+ * 2), email, date of birth, country and zip. Deliberately NOT touched: the "I agree to the Terms &
+ * Conditions" box, the Cloudflare Turnstile bot check and the Enter button, which stay with the user.
+ * Values are written the way a real edit would be (native setter plus input/change events) so the page's
+ * own scripts notice them, and it scrolls the agreement box into view. The form is waited for, up to ~10s.
+ */
+private fun broadwayDirectFillScript(p: com.broadwaylotto.model.Profile): String {
+    val dob = p.dob.split('-')
+    val values = JSONObject()
+        .put("first", p.firstName).put("last", p.lastName).put("email", p.email)
+        .put("qty", minOf(p.tickets, 2).toString())
+        .put("month", dob.getOrNull(1).orEmpty()).put("day", dob.getOrNull(2).orEmpty()).put("year", dob.getOrNull(0).orEmpty())
+        .put("zip", p.zip).put("country", p.country)
+    return """
+        (function(v) {
+          var tries = 0;
+          function setVal(id, val) {
+            var el = document.getElementById(id);
+            if (!el || !val) return;
+            var proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, val);
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          function pickCountry(name) {
+            var el = document.getElementById('dlslot_country');
+            if (!el) return;
+            for (var i = 0; i < el.options.length; i++) {
+              if (el.options[i].text.trim().toUpperCase() === name.toUpperCase()) {
+                el.selectedIndex = i;
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                return;
+              }
+            }
+          }
+          (function step() {
+            var form = document.querySelector('form[name=dlslot-entry-form]');
+            if (!form) { if (++tries < 40) setTimeout(step, 250); return; }
+            setVal('dlslot_name_first', v.first);
+            setVal('dlslot_name_last', v.last);
+            setVal('dlslot_ticket_qty', v.qty);
+            setVal('dlslot_email', v.email);
+            setVal('dlslot_dob_month', v.month);
+            setVal('dlslot_dob_day', v.day);
+            setVal('dlslot_dob_year', v.year);
+            setVal('dlslot_zip', v.zip);
+            if (v.country) pickCountry(v.country);
+            var agree = document.getElementById('dlslot_agree');
+            if (agree) agree.scrollIntoView({block: 'center'});
+          })();
+        })($values);
+    """.trimIndent()
 }
 
 /**
@@ -119,7 +186,7 @@ private fun fillEntryFormScript(ids: List<String>, tickets: Int): String {
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-private fun configure(webView: WebView, request: PageRequest, session: Map<String, String>?, onLoaded: () -> Unit) {
+private fun configure(webView: WebView, request: PageRequest, session: Map<String, String>?, fillScript: String?, onLoaded: () -> Unit) {
     val url = request.url
     webView.settings.javaScriptEnabled = true
     webView.settings.domStorageEnabled = true
@@ -142,11 +209,15 @@ private fun configure(webView: WebView, request: PageRequest, session: Map<Strin
                 if (request.preselect.isNotEmpty()) {
                     view.evaluateJavascript(fillEntryFormScript(request.preselect, request.tickets), null)
                 }
+                fillScript?.let { view.evaluateJavascript(it, null) }
             }
         }
 
         override fun shouldOverrideUrlLoading(view: WebView, req: WebResourceRequest): Boolean {
-            if (opensInApp(req.url.toString()) || req.url.host?.endsWith("google.com") == true) return false
+            // Stay in the app for the sites we host and Google's pages (reCAPTCHA); all of Broadway Direct's
+            // lottery site, not just the entry form, so its confirmation page after you enter stays here too.
+            val host = req.url.host.orEmpty()
+            if (opensInApp(req.url.toString()) || host == "lottery.broadwaydirect.com" || host.endsWith("google.com")) return false
             view.context.startActivity(Intent(Intent.ACTION_VIEW, req.url))
             return true
         }

@@ -24,12 +24,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -66,6 +72,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.broadwaylotto.automation.isApp
 import com.broadwaylotto.model.EntryRecord
 import com.broadwaylotto.model.EntryStatus
 import com.broadwaylotto.model.Profile
@@ -75,6 +82,7 @@ import com.broadwaylotto.model.Slot
 import com.broadwaylotto.model.TimeSlot
 import com.broadwaylotto.model.Watch
 import com.broadwaylotto.model.Weekday
+import com.broadwaylotto.sites.OtherPresets
 import com.broadwaylotto.sites.Sites
 import java.text.DateFormat
 import java.util.Date
@@ -126,13 +134,17 @@ fun ShowsList(
     defaults: Set<Slot>,
     statuses: Map<String, String>,
     modifier: Modifier,
+    onEnterApp: (Watch) -> Unit,
+    onOpenOther: (Watch) -> Unit,
     onToggle: (Watch) -> Unit,
     onOpen: (Watch) -> Unit,
     onGoProfile: () -> Unit,
 ) {
-    val active = watches.count { it.enabled && it.effectiveSlots(defaults).isNotEmpty() }
+    // "Other" shows (a show's own app or site) get their own section: nothing is checked or entered for them.
+    val (others, tracked) = watches.partition { it.site == Site.OTHER || it.site == Site.HAMILTON }
+    val active = tracked.count { it.enabled && it.effectiveSlots(defaults).isNotEmpty() }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { SectionHeader("Your shows", if (watches.isEmpty()) "Nothing on the bill yet" else "$active of ${watches.size} actively entering") }
+        item { SectionHeader("Your shows", if (watches.isEmpty()) "Nothing on the bill yet" else "$active of ${tracked.size} actively entering") }
         if (!profile.isComplete) item {
             Card(
                 Modifier.fillMaxWidth().clickable(onClick = onGoProfile),
@@ -148,12 +160,92 @@ fun ShowsList(
         if (watches.isEmpty()) item {
             EmptyState("Tap + to add a show", "Pick a site and a show, then tell us which days and times you can go.")
         }
-        items(watches, key = { it.id }) { w -> WatchCard(w, defaults, statuses[w.id], onToggle, onOpen) }
+        items(tracked, key = { it.id }) { w -> WatchCard(w, defaults, statuses[w.id], onEnterApp, onToggle, onOpen) }
+        if (others.isNotEmpty()) {
+            item { Column(Modifier.padding(top = 4.dp)) { SectionHeader("Other", "Shows with their own app or website") } }
+            items(others, key = { it.id }) { w ->
+                // Hamilton is automated like TodayTix, so it keeps the full card; user-added shortcuts get the simple one.
+                if (w.site == Site.OTHER) OtherCard(w, onOpenOther, onOpen)
+                else WatchCard(w, defaults, statuses[w.id], onEnterApp, onToggle, onOpen)
+            }
+        }
     }
 }
 
 @Composable
-private fun WatchCard(w: Watch, defaults: Set<Slot>, status: String?, onToggle: (Watch) -> Unit, onOpen: (Watch) -> Unit) {
+private fun OtherCard(w: Watch, onOpenOther: (Watch) -> Unit, onEdit: (Watch) -> Unit) {
+    val where = when {
+        w.link == null -> "No link saved"
+        w.link.startsWith("app:") -> "Opens its app"
+        else -> "Opens " + (android.net.Uri.parse(w.link).host ?: w.link)
+    }
+    Card(Modifier.fillMaxWidth().clickable { onEdit(w) }, shape = CardShape, colors = panelColors()) {
+        Row(Modifier.height(IntrinsicSize.Min)) {
+            Box(Modifier.width(5.dp).fillMaxHeight().background(Site.OTHER.accent()))
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(w.title, style = MaterialTheme.typography.titleLarge)
+                    Text("OTHER", fontSize = 11.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Bold, color = Site.OTHER.accent())
+                    Text(where, color = Muted, fontSize = 13.sp)
+                }
+                if (w.link != null) {
+                    Button(
+                        onClick = { onOpenOther(w) },
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
+                    ) { Text("Open", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                }
+            }
+        }
+    }
+}
+
+/** Editor for an "Other" show: just its name and where to enter. No days and times, nothing is automated. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun OtherEditor(initial: Watch, isNew: Boolean, onConfirm: (Watch) -> Unit, onDelete: () -> Unit, onBack: () -> Unit) {
+    var name by remember(initial.id) { mutableStateOf(initial.title) }
+    var link by remember(initial.id) { mutableStateOf(initial.link.orEmpty()) }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {},
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Cream) } },
+                actions = { if (!isNew) IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Remove show", tint = Bad) } },
+            )
+        },
+        bottomBar = {
+            Button(
+                onClick = { onConfirm(initial.copy(title = name.trim(), link = normalizeLink(link))) },
+                enabled = name.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().padding(16.dp).navigationBarsPadding().height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
+            ) { Text("OK", fontWeight = FontWeight.Bold) }
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).padding(16.dp, 0.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("OTHER", fontSize = 12.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Bold, color = Site.OTHER.accent())
+            Text("This lottery runs in the show's own app or website, so Broadway Lotto can't check or enter it. It just keeps it in your list with a shortcut.", color = Muted)
+            OutlinedTextField(name, { name = it }, label = { Text("Show name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                link, { link = it }, label = { Text("Website link") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                supportingText = { if (initial.link?.startsWith("app:") == true && link == initial.link) Text("Opens the app on your phone", color = Muted) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun WatchCard(
+    w: Watch,
+    defaults: Set<Slot>,
+    status: String?,
+    onEnterApp: (Watch) -> Unit,
+    onToggle: (Watch) -> Unit,
+    onOpen: (Watch) -> Unit,
+) {
     val slots = w.effectiveSlots(defaults)
     val dim = if (w.enabled) 1f else 0.5f
     Card(Modifier.fillMaxWidth().clickable { onOpen(w) }, shape = CardShape, colors = panelColors()) {
@@ -173,6 +265,14 @@ private fun WatchCard(w: Watch, defaults: Set<Slot>, status: String?, onToggle: 
                             val problem = status.startsWith("Not listed") || status.startsWith("Couldn't") || status.startsWith("Nothing left")
                             Text(status, color = if (problem) Warn else Good, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
+                        // These lotteries can only be entered through their phone app, so each card has its own button.
+                        if (w.site.isApp && w.enabled && slots.isNotEmpty()) {
+                            Button(
+                                onClick = { onEnterApp(w) },
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
+                            ) { Text("Enter lottery now", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+                        }
                     }
                 }
                 Switch(
@@ -187,8 +287,15 @@ private fun WatchCard(w: Watch, defaults: Set<Slot>, status: String?, onToggle: 
 
 // ---------------------------------------------------------------- Activity
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ActivityList(log: List<EntryRecord>, modifier: Modifier, onOpen: (EntryRecord) -> Unit, onClear: () -> Unit) {
+fun ActivityList(
+    log: List<EntryRecord>,
+    modifier: Modifier,
+    onOpen: (EntryRecord) -> Unit,
+    onDismiss: (EntryRecord) -> Unit,
+    onClear: () -> Unit,
+) {
     val fmt = remember { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT) }
     var confirmClear by remember { mutableStateOf(false) }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -199,12 +306,26 @@ fun ActivityList(log: List<EntryRecord>, modifier: Modifier, onOpen: (EntryRecor
             }
         }
         if (log.isEmpty()) item { EmptyState("Nothing yet", "Alerts show up here when a lottery you're watching opens. For what you've already entered, see the Entered tab.") }
-        items(log) { r ->
+        items(log, key = { "${it.lotteryId}:${it.atMillis}" }) { r ->
             val (color, glyph) = when (r.status) {
                 EntryStatus.ENTERED -> Good to "✓"
                 EntryStatus.NEEDS_MANUAL -> Warn to "!"
                 EntryStatus.FAILED -> Bad to "✕"
             }
+            // Swipe either way, or tap the ✕, to remove just this item.
+            val swipe = rememberSwipeToDismissBoxState(
+                confirmValueChange = { target ->
+                    if (target == SwipeToDismissBoxValue.Settled) false else { onDismiss(r); true }
+                },
+            )
+            SwipeToDismissBox(
+                state = swipe,
+                backgroundContent = {
+                    Box(Modifier.fillMaxSize().clip(CardShape).background(PanelHigh), contentAlignment = Alignment.CenterEnd) {
+                        Text("Dismiss", color = Muted, modifier = Modifier.padding(horizontal = 20.dp))
+                    }
+                },
+            ) {
             Card(Modifier.fillMaxWidth(), shape = CardShape, colors = panelColors()) {
                 Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     Box(Modifier.size(36.dp).clip(CircleShape).background(color.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
@@ -220,7 +341,11 @@ fun ActivityList(log: List<EntryRecord>, modifier: Modifier, onOpen: (EntryRecor
                             }
                         }
                     }
+                    IconButton(onClick = { onDismiss(r) }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Muted, modifier = Modifier.size(18.dp))
+                    }
                 }
+            }
             }
         }
     }
@@ -301,11 +426,21 @@ fun ProfileForm(
     onSave: (Profile) -> Unit,
     onDefaults: (Set<Slot>) -> Unit,
 ) {
-    var first by remember(profile) { mutableStateOf(profile.firstName) }
-    var last by remember(profile) { mutableStateOf(profile.lastName) }
-    var email by remember(profile) { mutableStateOf(profile.email) }
-    var tickets by remember(profile) { mutableStateOf(profile.tickets) }
-    val dirty = Profile(first.trim(), last.trim(), email.trim(), tickets) != profile
+    // Each field resets only when ITS saved value changes, so saving the ticket count (below) doesn't
+    // wipe a name or email the user is half-way through typing.
+    var first by remember(profile.firstName) { mutableStateOf(profile.firstName) }
+    var last by remember(profile.lastName) { mutableStateOf(profile.lastName) }
+    var email by remember(profile.email) { mutableStateOf(profile.email) }
+    var zip by remember(profile.zip) { mutableStateOf(profile.zip) }
+    var country by remember(profile.country) { mutableStateOf(profile.country) }
+    // Date of birth is kept as three fields (like the sites' own forms) and saved as ISO yyyy-MM-dd.
+    val dobSaved = remember(profile.dob) { profile.dob.split('-') }
+    var dobMonth by remember(profile.dob) { mutableStateOf(dobSaved.getOrNull(1)?.trimStart('0').orEmpty()) }
+    var dobDay by remember(profile.dob) { mutableStateOf(dobSaved.getOrNull(2)?.trimStart('0').orEmpty()) }
+    var dobYear by remember(profile.dob) { mutableStateOf(dobSaved.getOrNull(0).orEmpty()) }
+    val dobIso = dobToIso(dobMonth, dobDay, dobYear) // null = not a real date
+    // The ticket count saves the moment it changes, so it isn't part of "unsaved changes".
+    val dirty = dobIso != null && Profile(first.trim(), last.trim(), email.trim(), profile.tickets, dobIso, zip.trim(), country) != profile
 
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp, 8.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         SectionHeader("Default availability", "Every show uses this unless you override it")
@@ -313,6 +448,7 @@ fun ProfileForm(
         Spacer(Modifier.height(8.dp))
         SectionHeader("Accounts", "Sign-ins for the lottery sites")
         LuckySeatAccountCard()
+        AppAutomationCard()
         Spacer(Modifier.height(8.dp))
         SectionHeader("Your details", "Used on lottery entry forms")
         Card(Modifier.fillMaxWidth(), shape = CardShape, colors = panelColors()) {
@@ -322,27 +458,53 @@ fun ProfileForm(
                     OutlinedTextField(last, { last = it }, label = { Text("Last name") }, singleLine = true, modifier = Modifier.weight(1f))
                 }
                 OutlinedTextField(email, { email = it }, label = { Text("Email") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Text("Date of birth", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    val digits = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    OutlinedTextField(dobMonth, { dobMonth = it.filter(Char::isDigit).take(2) }, label = { Text("MM") }, singleLine = true, keyboardOptions = digits, isError = dobIso == null, modifier = Modifier.weight(1f))
+                    OutlinedTextField(dobDay, { dobDay = it.filter(Char::isDigit).take(2) }, label = { Text("DD") }, singleLine = true, keyboardOptions = digits, isError = dobIso == null, modifier = Modifier.weight(1f))
+                    OutlinedTextField(dobYear, { dobYear = it.filter(Char::isDigit).take(4) }, label = { Text("YYYY") }, singleLine = true, keyboardOptions = digits, isError = dobIso == null, modifier = Modifier.weight(1.4f))
+                }
+                if (dobIso == null) Text("That isn't a valid date.", color = Bad, fontSize = 12.sp)
+                else Text("Broadway Direct asks for it. Your details are stored encrypted on this phone.", color = Muted, fontSize = 12.sp)
+                OutlinedTextField(zip, { zip = it.take(10) }, label = { Text("Zip / postal code") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Text("Country of residence", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("USA" to "USA", "CANADA" to "Canada", "OTHER" to "Other").forEach { (value, label) ->
+                        FilterChip(selected = country == value, onClick = { country = value }, label = { Text(label) })
+                    }
+                }
             }
         }
         Card(Modifier.fillMaxWidth(), shape = CardShape, colors = panelColors()) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Tickets per entry", style = MaterialTheme.typography.titleMedium)
-                    Text("Most lotteries allow 1–4", color = Muted, fontSize = 13.sp)
+                    Text("Saved as you tap. Most lotteries allow 1–4", color = Muted, fontSize = 13.sp)
                 }
-                OutlinedButton(onClick = { if (tickets > 1) tickets-- }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(40.dp)) { Text("−") }
-                Text("$tickets", style = MaterialTheme.typography.titleLarge, modifier = Modifier.width(40.dp), textAlign = TextAlign.Center)
-                OutlinedButton(onClick = { if (tickets < 4) tickets++ }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(40.dp)) { Text("+") }
+                OutlinedButton(onClick = { if (profile.tickets > 1) onSave(profile.copy(tickets = profile.tickets - 1)) }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(40.dp)) { Text("−") }
+                Text("${profile.tickets}", style = MaterialTheme.typography.titleLarge, modifier = Modifier.width(40.dp), textAlign = TextAlign.Center)
+                OutlinedButton(onClick = { if (profile.tickets < 4) onSave(profile.copy(tickets = profile.tickets + 1)) }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(40.dp)) { Text("+") }
             }
         }
         Button(
-            onClick = { onSave(Profile(first.trim(), last.trim(), email.trim(), tickets)) },
+            onClick = { onSave(Profile(first.trim(), last.trim(), email.trim(), profile.tickets, dobIso.orEmpty(), zip.trim(), country)) },
             enabled = dirty,
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape = RoundedCornerShape(14.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
         ) { Text(if (dirty) "Save" else "Saved", fontWeight = FontWeight.Bold) }
     }
+}
+
+/** "" when all three are blank, an ISO date when they form a real past date, null when they don't. */
+private fun dobToIso(month: String, day: String, year: String): String? {
+    if (month.isBlank() && day.isBlank() && year.isBlank()) return ""
+    return runCatching {
+        java.time.LocalDate.of(year.toInt(), month.toInt(), day.toInt())
+            .takeIf { it.year >= 1900 && !it.isAfter(java.time.LocalDate.now()) }
+            ?.toString()
+    }.getOrNull()
 }
 
 // ---------------------------------------------------------------- Add show
@@ -355,7 +517,7 @@ fun AddShowDialog(
     existing: Set<Pair<Site, String>>,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
-    onPick: (Site, String) -> Unit,
+    onPick: (Site, String, String?) -> Unit,
 ) {
     var site by remember { mutableStateOf(Site.BROADWAY_DIRECT) }
     val shows = catalog[site.name].orEmpty()
@@ -374,7 +536,7 @@ fun AddShowDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 // Scrolls sideways so every chip keeps its full label.
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Site.entries.forEach {
+                    Site.entries.filter { it != Site.HAMILTON }.forEach {
                         FilterChip(
                             selected = site == it,
                             onClick = { site = it },
@@ -382,6 +544,10 @@ fun AddShowDialog(
                             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = it.accent(), selectedLabelColor = Ink),
                         )
                     }
+                }
+                if (site == Site.OTHER) {
+                    OtherPicker(existing, onPick)
+                    return@Column
                 }
                 if (shows.isEmpty()) {
                     Text(if (refreshing) "Loading shows…" else "No shows loaded yet. Tap Refresh.", color = Muted)
@@ -400,7 +566,7 @@ fun AddShowDialog(
                         Row(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(PanelHigh)
                                 .alpha(if (added) 0.5f else 1f)
-                                .clickable(enabled = !added) { onPick(site, title) }.padding(14.dp),
+                                .clickable(enabled = !added) { onPick(site, title, null) }.padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box(Modifier.size(8.dp).clip(CircleShape).background(site.accent()))
@@ -412,6 +578,53 @@ fun AddShowDialog(
             }
         },
     )
+}
+
+/** The "Other" tab of the Add dialog: known own-app lotteries, or any show + link the user types. */
+@Composable
+private fun OtherPicker(existing: Set<Pair<Site, String>>, onPick: (Site, String, String?) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var link by remember { mutableStateOf("") }
+    val nameTaken = (Site.OTHER to name.trim()) in existing
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("For lotteries that run in a show's own app or website. Hamilton is entered for you; anything you add yourself is kept in your list with a shortcut.", color = Muted, fontSize = 12.sp)
+        OtherPresets.all.forEach { preset ->
+            val added = (preset.site to preset.title) in existing
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(PanelHigh)
+                    .alpha(if (added) 0.5f else 1f)
+                    .clickable(enabled = !added) { onPick(preset.site, preset.title, null) }.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(Site.OTHER.accent()))
+                Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                    Text(preset.title, style = MaterialTheme.typography.titleMedium)
+                    Text(preset.where, color = Muted, fontSize = 12.sp)
+                }
+                if (added) Text("Added", color = Muted, fontSize = 12.sp)
+            }
+        }
+        Text("Or add your own", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 4.dp))
+        OutlinedTextField(name, { name = it }, label = { Text("Show name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(link, { link = it }, label = { Text("Website link (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        if (nameTaken) Text("Already in your list.", color = Warn, fontSize = 12.sp)
+        Button(
+            onClick = { onPick(Site.OTHER, name.trim(), normalizeLink(link)) },
+            enabled = name.isNotBlank() && !nameTaken,
+            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Ink),
+        ) { Text("Add") }
+    }
+}
+
+/** Blank -> none; adds https:// when the user didn't type a scheme. */
+internal fun normalizeLink(raw: String): String? {
+    val t = raw.trim()
+    return when {
+        t.isEmpty() -> null
+        t.startsWith("app:") || t.contains("://") -> t
+        else -> "https://$t"
+    }
 }
 
 // ---------------------------------------------------------------- Editor

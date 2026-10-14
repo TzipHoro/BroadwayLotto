@@ -14,6 +14,16 @@ import java.time.LocalDateTime
 interface SiteAdapter {
     val site: Site
 
+    /**
+     * False for a site whose lotteries can't be checked from outside (TodayTix's exist only in its
+     * phone app). The engine then skips alerts for it and the show cards say how to enter instead of
+     * wrongly claiming the show "isn't listed".
+     */
+    val canListLotteries: Boolean get() = true
+
+    /** False when there's no list of shows to fetch (the user adds their own, see [OtherSite]). */
+    val hasCatalog: Boolean get() = true
+
     /** Shows this site runs lotteries for, for the "add a show" picker. */
     suspend fun shows(): List<String>
 
@@ -47,6 +57,9 @@ object Sites {
             when (it) {
                 Site.BROADWAY_DIRECT -> BroadwayDirectSite(web)
                 Site.LUCKY_SEAT -> LuckySeatSite(web, luckySeatAuth)
+                Site.TODAYTIX -> TodayTixSite(web)
+                Site.HAMILTON -> HamiltonSite()
+                Site.OTHER -> OtherSite()
                 else -> MockSite(it)
             }
         }
@@ -59,6 +72,7 @@ object Sites {
     suspend fun refreshShows(repo: com.broadwaylotto.model.Repo): Map<Site, String> {
         val errors = mutableMapOf<Site, String>()
         for ((site, adapter) in all) {
+            if (!adapter.hasCatalog) continue
             try {
                 val titles = adapter.shows()
                 if (titles.isEmpty()) errors[site] = "no shows found" else repo.setShows(site, titles)

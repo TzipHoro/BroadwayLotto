@@ -52,12 +52,16 @@ import com.broadwaylotto.model.Site
 import com.broadwaylotto.model.SiteEntry
 import com.broadwaylotto.model.Watch
 import com.broadwaylotto.sites.Sites
+import com.broadwaylotto.automation.AppLauncher
 import kotlinx.coroutines.launch
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     /** A link a notification asked us to open (see [EXTRA_OPEN_URL]); consumed by [App]. */
     private val incoming = mutableStateOf<PageRequest?>(null)
+
+    /** "SITE|show title" a notification asked us to enter (see [EXTRA_APP_ENTER]). */
+    private val incomingAppEntry = mutableStateOf<String?>(null)
 
     private fun Intent.toPageRequest() = getStringExtra(EXTRA_OPEN_URL)?.let {
         PageRequest(it, getStringArrayExtra(EXTRA_PRESELECT)?.toList().orEmpty(), getIntExtra(EXTRA_TICKETS, 0))
@@ -66,10 +70,12 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         incoming.value = intent.toPageRequest()
+        incomingAppEntry.value = intent.getStringExtra(EXTRA_APP_ENTER)
     }
 
     companion object {
         const val EXTRA_OPEN_URL = "open_url"
+        const val EXTRA_APP_ENTER = "app_enter"
         const val EXTRA_PRESELECT = "preselect"
         const val EXTRA_TICKETS = "tickets"
     }
@@ -77,6 +83,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         incoming.value = intent?.toPageRequest()
+        incomingAppEntry.value = intent?.getStringExtra(EXTRA_APP_ENTER)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -84,7 +91,12 @@ class MainActivity : ComponentActivity() {
         Scheduler.ensurePeriodic(this)
         val repo = Repo.get(this)
         setContent {
-            LottoTheme { App(repo, incoming.value, onIncomingHandled = { incoming.value = null }) }
+            LottoTheme {
+                App(
+                    repo, incoming.value, onIncomingHandled = { incoming.value = null },
+                    incomingAppEntry = incomingAppEntry.value, onAppEntryHandled = { incomingAppEntry.value = null },
+                )
+            }
         }
     }
 }
@@ -98,8 +110,59 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun App(repo: Repo, incoming: PageRequest?, onIncomingHandled: () -> Unit) {
+private fun App(
+    repo: Repo,
+    incoming: PageRequest?,
+    onIncomingHandled: () -> Unit,
+    incomingAppEntry: String?,
+    onAppEntryHandled: () -> Unit,
+) {
     val context = LocalContext.current
+
+    // Hamilton's entry page has two "I accept / I have reviewed" checkboxes, and we tick them for the
+    // user, so the first Hamilton run waits for an explicit OK (remembered afterwards).
+    var consentFor by remember { mutableStateOf<Pair<Site, String>?>(null) }
+    val hamiltonConsent by repo.hamiltonConsent.collectAsState()
+
+    // Enter one show of an app-only site (TodayTix, Hamilton): from its card's button or its alert.
+    fun enterApp(site: Site, title: String) {
+        if (site == Site.HAMILTON && !hamiltonConsent) {
+            consentFor = site to title
+            return
+        }
+        AppLauncher.start(context, repo, site, title)
+            ?.let { android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_LONG).show() }
+    }
+    consentFor?.let { (site, title) ->
+        HamiltonConsentDialog(
+            onAgree = { repo.setHamiltonConsent(true); consentFor = null; enterApp(site, title) },
+            onDismiss = { consentFor = null },
+        )
+    }
+    // "Other" shows: open the show's own app ("app:<package>") or website. If the app isn't installed,
+    // fall back to its Play Store page.
+    fun openOther(watch: Watch) {
+        val link = watch.link ?: return
+        val intent = if (link.startsWith("app:")) {
+            val pkg = link.removePrefix("app:")
+            context.packageManager.getLaunchIntentForPackage(pkg)
+                ?: Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
+        } else {
+            Intent(Intent.ACTION_VIEW, Uri.parse(link))
+        }
+        runCatching { context.startActivity(intent) }.onFailure {
+            android.widget.Toast.makeText(context, "Couldn't open that link", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(incomingAppEntry) {
+        if (incomingAppEntry != null) {
+            // "SITE|show title", as written by Notifier.appLotteryOpen.
+            val site = Site.entries.firstOrNull { it.name == incomingAppEntry.substringBefore('|') }
+            if (site != null) enterApp(site, incomingAppEntry.substringAfter('|'))
+            onAppEntryHandled()
+        }
+    }
     var tab by remember { mutableStateOf(Tab.SHOWS) }
     var editingId by remember { mutableStateOf<String?>(null) }
     // Set while the in-app browser is showing a lottery page.
@@ -186,14 +249,24 @@ private fun App(repo: Repo, incoming: PageRequest?, onIncomingHandled: () -> Uni
     if (editing != null) {
         fun close() { newWatch = null; editingId = null }
         BackHandler(onBack = ::close)
-        WatchEditor(
-            initial = editing,
-            isNew = newWatch != null,
-            defaults = defaults,
-            onConfirm = { repo.upsert(it); close() },
-            onDelete = { repo.remove(editing.id); close() },
-            onBack = ::close,
-        )
+        if (editing.site == Site.OTHER) {
+            OtherEditor(
+                initial = editing,
+                isNew = newWatch != null,
+                onConfirm = { repo.upsert(it); close() },
+                onDelete = { repo.remove(editing.id); close() },
+                onBack = ::close,
+            )
+        } else {
+            WatchEditor(
+                initial = editing,
+                isNew = newWatch != null,
+                defaults = defaults,
+                onConfirm = { repo.upsert(it); close() },
+                onDelete = { repo.remove(editing.id); close() },
+                onBack = ::close,
+            )
+        }
         return
     }
 
@@ -238,9 +311,9 @@ private fun App(repo: Repo, incoming: PageRequest?, onIncomingHandled: () -> Uni
     ) { pad ->
         val m = Modifier.padding(pad)
         when (tab) {
-            Tab.SHOWS -> ShowsList(watches, profile, defaults, statuses, m, onToggle = { repo.upsert(it.copy(enabled = !it.enabled)) }, onOpen = { editingId = it.id }, onGoProfile = { tab = Tab.SETTINGS })
+            Tab.SHOWS -> ShowsList(watches, profile, defaults, statuses, m, onEnterApp = { enterApp(it.site, it.title) }, onOpenOther = { openOther(it) }, onToggle = { repo.upsert(it.copy(enabled = !it.enabled)) }, onOpen = { editingId = it.id }, onGoProfile = { tab = Tab.SETTINGS })
             Tab.ENTERED -> EntriesList(entries, entryErrors, entriesLoading, m, onRefresh = ::refreshEntries, onOpen = { openLink(it) })
-            Tab.ACTIVITY -> ActivityList(log, m, onOpen = { openLink(PageRequest(it.deepLink, it.preselect, it.tickets)) }, onClear = repo::clearLog)
+            Tab.ACTIVITY -> ActivityList(log, m, onOpen = { openLink(PageRequest(it.deepLink, it.preselect, it.tickets)) }, onDismiss = repo::removeRecord, onClear = repo::clearLog)
             Tab.SETTINGS -> ProfileForm(profile, defaults, m, repo::setProfile, repo::setDefaults)
         }
     }
@@ -253,9 +326,13 @@ private fun App(repo: Repo, incoming: PageRequest?, onIncomingHandled: () -> Uni
             existing = watches.mapTo(mutableSetOf()) { it.site to it.title },
             onRefresh = ::refreshShows,
             onDismiss = { adding = false },
-            onPick = { site, title ->
+            onPick = { site, title, link ->
                 adding = false
-                if (watches.none { it.site == site && it.title == title }) newWatch = Watch(UUID.randomUUID().toString(), title, site)
+                if (watches.none { it.site == site && it.title == title }) {
+                    val watch = Watch(UUID.randomUUID().toString(), title, site, link = link)
+                    // "Other" shows have no days/times to confirm, so they're added straight away.
+                    if (site == Site.OTHER) repo.upsert(watch) else newWatch = watch
+                }
             },
         )
     }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Limited to the two lottery apps on purpose: Android only delivers these packages' screens and
+  notifications to this service, so it can't see or touch anything else on the phone.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagReportViewIds"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/app_automation_description"
+    android:notificationTimeout="100"
+    android:packageNames="com.todaytix.TodayTix,com.hamilton.app" />

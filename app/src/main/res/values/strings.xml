@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_automation_description">Lets Broadway Lotto tap through the TodayTix and Hamilton apps on your behalf to enter the lotteries you picked. It can only see those two apps, and it only acts when you start it.</string>
+</resources>

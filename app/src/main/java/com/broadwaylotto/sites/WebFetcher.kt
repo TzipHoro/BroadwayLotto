@@ -12,7 +12,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.IOException
 import java.util.UUID
@@ -55,28 +55,50 @@ class WebFetcher(context: Context) {
 
     private suspend fun send(origin: String, url: String, method: String, headers: Map<String, String>, body: String?): String =
         mutex.withLock {
-            withTimeout(45_000) {
-                withContext(Dispatchers.Main) {
-                    val wv = load(origin)
-                    val (status, text) = request(wv, url, method, headers, body)
-                    when {
-                        status == 0 -> throw IOException("network error: $text")
-                        status != 200 -> throw HttpStatusException(status, url)
-                        else -> text
-                    }
+            withContext(Dispatchers.Main) {
+                // Try twice: a failure is often the page being replaced mid-request or a slow first load,
+                // and a fresh load of the origin fixes that.
+                var result = runCatching { attempt(origin, url, method, headers, body, fallback = false) }
+                if (result.exceptionOrNull() is IOException) {
+                    loadedOrigin = null
+                    result = runCatching { attempt(origin, url, method, headers, body, fallback = true) }
+                }
+                val (status, text) = result.getOrThrow()
+                when {
+                    status != 200 -> throw HttpStatusException(status, url)
+                    else -> text
                 }
             }
         }
 
+    /**
+     * One load-then-fetch. [fallback] switches the starting page from a light one to the site's own
+     * front page (slower, but it's what is known to work everywhere). Throws [IOException] with a
+     * specific reason, never a bare timeout.
+     */
+    private suspend fun attempt(
+        origin: String, url: String, method: String, headers: Map<String, String>, body: String?, fallback: Boolean,
+    ): Pair<Int, String> {
+        val page = if (fallback) origin else origin + (LIGHT_PAGES[origin] ?: "/robots.txt")
+        val seconds = if (fallback) 45L else 20L
+        val wv = withTimeoutOrNull(seconds * 1000) { load(origin, page) }
+            ?: throw IOException("$page didn't finish loading within $seconds seconds")
+        val (status, text) = withTimeoutOrNull(25_000) { request(wv, url, method, headers, body) }
+            ?: throw IOException("no answer from ${url.take(80)} within 25 seconds")
+        if (status == 0) throw IOException("network error ($text) fetching ${url.take(80)}")
+        return status to text
+    }
+
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
-    private suspend fun load(origin: String): WebView {
+    private suspend fun load(origin: String, page: String): WebView {
         val wv = webView ?: WebView(appContext).also {
             it.settings.javaScriptEnabled = true
             it.settings.domStorageEnabled = true
             it.addJavascriptInterface(Bridge(), "BroadwayLotto")
             webView = it
         }
-        if (loadedOrigin == origin) return wv
+        // Reuse the page only if it's still on this origin: a redirect can have moved it elsewhere.
+        if (loadedOrigin == origin && wv.url?.startsWith(origin) == true) return wv
         loadedOrigin = null
         suspendCancellableCoroutine { cont ->
             wv.webViewClient = object : WebViewClient() {
@@ -90,8 +112,12 @@ class WebFetcher(context: Context) {
                     }
                 }
             }
-            cont.invokeOnCancellation { wv.stopLoading() }
-            wv.loadUrl(origin)
+            // Cancellation can arrive on any thread (WorkManager cancels from its own), but WebView
+            // methods are main-thread only, so hop over before touching it.
+            cont.invokeOnCancellation { android.os.Handler(android.os.Looper.getMainLooper()).post { wv.stopLoading() } }
+            // Any page on the origin will do as the place to run fetch() from. A tiny one (see LIGHT_PAGES)
+            // finishes quickly, unlike a full front page with bot checks, analytics and ads.
+            wv.loadUrl(page)
         }
         loadedOrigin = origin
         return wv
@@ -113,4 +139,14 @@ class WebFetcher(context: Context) {
                 null,
             )
         }
+
+    private companion object {
+        /**
+         * Small same-origin pages to start from, per site. Anything not listed uses /robots.txt.
+         * Lucky Seat has no robots.txt (its address would load the whole app), but this API reply is tiny.
+         */
+        val LIGHT_PAGES = mapOf(
+            "https://www.luckyseat.com" to "/api/showmanagement/getshowcategories",
+        )
+    }
 }

@@ -26,6 +26,7 @@ class MockSite(override val site: Site) : SiteAdapter {
         Site.BROADWAY_DIRECT -> listOf("Hamilton", "Six", "Moulin Rouge!")
         Site.TODAYTIX -> listOf("Wicked", "Chicago", "Hadestown")
         Site.LUCKY_SEAT -> listOf("Hamilton", "Hadestown", "The Lion King")
+        Site.HAMILTON, Site.OTHER -> emptyList()
     }
 
     private val weekly: Map<DayOfWeek, List<LocalTime>> = mapOf(
@@ -59,6 +60,7 @@ class MockSite(override val site: Site) : SiteAdapter {
                         lottery(title, opens.at(0, 0), closes.at(0, 0), (0L until 14L).flatMap { performancesOn(closes.plusDays(it)) })
                     }
                 }
+                Site.HAMILTON, Site.OTHER -> emptyList()
             }
         }
     }
